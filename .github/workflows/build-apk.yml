@@ -13,8 +13,12 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
+
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
     steps:
       - name: Checkout repository
@@ -26,15 +30,31 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Locate Android SDK tools
+        shell: bash
+        run: |
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" \
+            -type f -name sdkmanager | head -n 1)"
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager not found"
+            exit 1
+          fi
+
+          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+          echo "Found: $SDKMANAGER"
 
       - name: Accept Android SDK licenses
-        run: yes | sdkmanager --licenses || true
-
-      - name: Install Android build tools
+        shell: bash
         run: |
-          sdkmanager --install \
+          set -o pipefail
+          yes | "$SDKMANAGER" --licenses
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          "$SDKMANAGER" --install \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0" \
@@ -42,18 +62,18 @@ jobs:
             "cmake;3.22.1"
 
       - name: Extract source code
+        shell: bash
         run: |
+          test -f QuanLauncher-source.zip
           mkdir -p "$RUNNER_TEMP/quan-source"
           unzip -q QuanLauncher-source.zip \
             -d "$RUNNER_TEMP/quan-source"
 
-      - name: Locate Android project
-        run: |
           PROJECT_DIR="$(find "$RUNNER_TEMP/quan-source" \
-            -name gradlew -type f -print -quit | xargs -r dirname)"
+            -type f -name gradlew -print -quit | xargs -r dirname)"
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: gradlew not found"
+            echo "ERROR: gradlew not found in source ZIP"
             exit 1
           fi
 
@@ -64,19 +84,13 @@ jobs:
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Project: $PROJECT_DIR"
-
-      - name: Prepare native dependencies
-        run: |
-          cd "$PROJECT_DIR"
-          if [ -f .gitmodules ]; then
-            git submodule update --init --recursive
-          fi
+          echo "Project directory: $PROJECT_DIR"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
       - name: Build debug APK
+        shell: bash
         run: |
           cd "$PROJECT_DIR"
           chmod +x gradlew
@@ -85,20 +99,24 @@ jobs:
             --stacktrace
 
       - name: Collect APK
+        shell: bash
         run: |
-          mkdir -p output
-          find "$PROJECT_DIR" \
-            -type f -path '*/build/outputs/apk/debug/*.apk' \
-            -exec cp {} output/ \;
+          mkdir -p "$GITHUB_WORKSPACE/output"
 
-          if ! ls output/*.apk >/dev/null 2>&1; then
-            echo "ERROR: APK not generated"
+          find "$PROJECT_DIR" \
+            -type f \
+            -path '*/build/outputs/apk/debug/*.apk' \
+            -exec cp {} "$GITHUB_WORKSPACE/output/" \;
+
+          if ! find "$GITHUB_WORKSPACE/output" \
+            -maxdepth 1 -name '*.apk' -type f | grep -q .; then
+            echo "ERROR: No APK generated"
             exit 1
           fi
 
-          ls -lh output/
+          ls -lh "$GITHUB_WORKSPACE/output"
 
-      - name: Upload APK
+      - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: QuanLauncher-debug
