@@ -14,6 +14,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
@@ -28,58 +29,44 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android NDK and CMake
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses || true
+
+      - name: Install Android build tools
         run: |
-          sdkmanager "ndk;28.2.13676358" "cmake;3.22.1"
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;28.2.13676358" \
+            "cmake;3.22.1"
 
       - name: Extract source code
         run: |
+          mkdir -p "$RUNNER_TEMP/quan-source"
           unzip -q QuanLauncher-source.zip \
             -d "$RUNNER_TEMP/quan-source"
-          echo "PROJECT_DIR=$RUNNER_TEMP/quan-source/LeviLaunchroid-main" >> "$GITHUB_ENV"
+          find "$RUNNER_TEMP/quan-source" -maxdepth 3 \
+            -name gradlew -type f
+
+      - name: Locate Android project
+        run: |
+          PROJECT_DIR="$(find "$RUNNER_TEMP/quan-source" \
+            -name gradlew -type f -print -quit | xargs dirname)"
+          if [ -z "$PROJECT_DIR" ] || [ ! -f "$PROJECT_DIR/settings.gradle" -a ! -f "$PROJECT_DIR/settings.gradle.kts" ]; then
+            echo "ERROR: Android Gradle project not found"
+            exit 1
+          fi
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Project found: $PROJECT_DIR"
 
       - name: Prepare native dependencies
         run: |
           cd "$PROJECT_DIR"
-          rm -rf app/src/main/cpp/preloader
-          rm -rf app/src/main/cpp/libHttpClient
-          git clone --depth 1 --recurse-submodules \
-            https://github.com/LiteLDev/preloader-android.git \
-            app/src/main/cpp/preloader
-          git clone --depth 1 --recurse-submodules \
-            https://github.com/microsoft/libHttpClient.git \
-            app/src/main/cpp/libHttpClient
 
-      - name: Prepare Firebase placeholder
-        run: |
-          mkdir -p "$PROJECT_DIR/app"
-          cat > "$PROJECT_DIR/app/google-services.json" <<'JSON'
-          {
-            "project_info": {
-              "project_number": "000000000000",
-              "project_id": "ci-placeholder",
-              "storage_bucket": "ci-placeholder.appspot.com"
-            },
-            "client": [{
-              "client_info": {
-                "mobilesdk_app_id": "1:000000000000:android:0000000000000000000000",
-                "android_client_info": {
-                  "package_name": "org.levimc.launcher"
-                }
-              },
-              "oauth_client": [],
-              "api_key": [{
-                "current_key": "AIzaSyCIOnlyPlaceholderKey"
-              }],
-              "services": {
-                "appinvite_service": {
-                  "other_platform_oauth_client": []
-                }
-              }
-            }],
-            "configuration_version": "1"
-          }
-          JSON
+          if [ -f .gitmodules ]; then
+            git submodule update --init --recursive
+          fi
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -88,19 +75,28 @@ jobs:
         run: |
           cd "$PROJECT_DIR"
           chmod +x gradlew
-          ./gradlew :app:assembleDebug --no-daemon
+          ./gradlew :app:assembleDebug \
+            --no-daemon \
+            --stacktrace
 
-      - name: Collect APK
+      - name: Find generated APK
         run: |
-          mkdir -p output
-          find "$PROJECT_DIR/app/build/outputs/apk/debug" \
-            -type f -name '*.apk' -exec cp {} output/QuanLauncher-debug.apk \;
-          test -s output/QuanLauncher-debug.apk
+          mkdir -p "$GITHUB_WORKSPACE/output"
+          find "$PROJECT_DIR" \
+            -type f -path '*/build/outputs/apk/debug/*.apk' \
+            -exec cp {} "$GITHUB_WORKSPACE/output/" \;
 
-      - name: Upload APK
+          if ! ls "$GITHUB_WORKSPACE/output/"*.apk >/dev/null 2>&1; then
+            echo "ERROR: No debug APK was generated"
+            exit 1
+          fi
+
+          ls -lh "$GITHUB_WORKSPACE/output/"
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: QuanLauncher-debug
-          path: output/QuanLauncher-debug.apk
+          path: output/*.apk
           if-no-files-found: error
           retention-days: 7
